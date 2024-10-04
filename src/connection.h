@@ -8,19 +8,16 @@
 // Initialize OpenSSL (only needs to be called once)
 void initialize_openssl();
 
-// Function to create a non-secure connection (returns a BIO object)
-BIO* create_unsecured_connection(const char *hostname, const char *port);
-
-// Function to create an SSL context for a secure connection
+// Create SSL context (for optional certificate file and directory)
 SSL_CTX* create_ssl_context(const char *certfile, const char *certdir);
 
-// Function to create a secure SSL connection (returns a BIO object)
-BIO* create_secure_connection(struct Config *config, SSL_CTX **out_ctx);
+// Function to create socket
+int create_raw_socket(const char *hostname, int port);
 
-// Function to close a non-secure connection
-void disconnect_unsecured(BIO *bio);
+// Function to create a secure SSL connection
+SSL* create_secure_connection(int sockfd, SSL_CTX *ctx);
 
 // Function to close a secure connection and free the SSL context
-void disconnect_secure(BIO *bio, SSL_CTX *ctx);
+void close_secure_connection(SSL *ssl, SSL_CTX *ctx);
 
 #endif
