@@ -3,7 +3,11 @@
 
 #include "main.h"
 
-void print_usage();
-bool parse_arguments(int argc, char* argv[], struct Config *config);
+// helper function to load username and password
+bool load_auth_file(const char *auth_file, struct Config *config);
+// function that prints usage
+void printUsage();
+// function to parse input arguments
+bool ParseArguments(int argc, char* argv[], struct Config *config);
 
 #endif

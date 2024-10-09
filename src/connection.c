@@ -12,13 +12,12 @@
 
 #include "main.h"
 
-// Initialize OpenSSL
+
 void initialize_openssl() {
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
 }
 
-// Create SSL context with optional certificate file and directory
 SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
     SSL_CTX *ctx;
 
@@ -50,7 +49,6 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
     return ctx;
 }
 
-//create raw socket
 int create_raw_socket(const char *hostname, int port) {
     int sock ;
     struct sockaddr_in server_addr;
@@ -93,7 +91,6 @@ int create_raw_socket(const char *hostname, int port) {
     return sock; // Return the socket file descriptor
 }
 
-// Function to create a secure connection
 SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
     SSL *ssl;
 
@@ -142,7 +139,6 @@ SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
     return ssl;
 }
 
-// Function to clean up SSL connection
 void close_secure_connection(SSL *ssl, SSL_CTX *ctx) {
     SSL_shutdown(ssl);
     SSL_free(ssl);

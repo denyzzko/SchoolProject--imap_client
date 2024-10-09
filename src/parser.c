@@ -6,12 +6,47 @@
 #include "parser.h"
 #include "main.h"
 
-void print_usage() {
+// ******************************************
+// * add automatic port 443 when -T us used *
+// ******************************************
+bool load_auth_file(const char *auth_file, struct Config *config) {
+    FILE *file = fopen(auth_file, "r");
+    if (file == NULL) {
+        fprintf(stderr, "Error: Unable to open auth_file %s.\n", auth_file);
+        return false;
+    }
+
+    char line[MAX_STR_LEN];
+    while (fgets(line, sizeof(line), file)) {
+        //username
+        if (strncmp(line, "username = ", 11) == 0) {
+            strncpy(config->username, line + 11, MAX_STR_LEN - 1);
+            config->username[strcspn(config->username, "\n")] = '\0';  // remove newline
+        }
+        //password
+        else if (strncmp(line, "password = ", 11) == 0) {
+            strncpy(config->password, line + 11, MAX_STR_LEN - 1);
+            config->password[strcspn(config->password, "\n")] = '\0';
+        }
+    }
+
+    fclose(file);
+
+    // ensure both values are set
+    if (strlen(config->username) == 0 || strlen(config->password) == 0) {
+        fprintf(stderr, "Error: Username or password missing in auth_file.\n");
+        return false;
+    }
+
+    return true;
+}
+
+void printUsage() {
     printf("USAGE: imapcl server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n");
 }
 
-bool parse_arguments(int argc, char* argv[], struct Config *config) {
-    // Set default values
+bool ParseArguments(int argc, char* argv[], struct Config *config) {
+    // default values
     config->port = 143;
     config->use_ssl = false;
     strcpy(config->certdir, "/etc/ssl/certs");
@@ -21,7 +56,7 @@ bool parse_arguments(int argc, char* argv[], struct Config *config) {
 
     int opt;
 
-    // Parse command-line options using getopt
+    // parsing
     while ((opt = getopt(argc, argv, "p:Tc:C:nha:b:o:")) != -1) {
         switch (opt) {
             case 'p':
@@ -52,31 +87,36 @@ bool parse_arguments(int argc, char* argv[], struct Config *config) {
                 strncpy(config->out_dir, optarg, MAX_STR_LEN - 1);
                 break;
             default:
-                print_usage();
+                printUsage();
                 return false;
         }
     }
 
-    // Check for remaining non-option argument (the server)
+    // remaining non-option argument (the server)
     if (optind < argc) {
         if (optind + 1 == argc) {
             strncpy(config->server, argv[optind], MAX_STR_LEN - 1);
         } else {
             printf("Error: Invalid number of arguments.\n");
-            print_usage();
+            printUsage();
             return false;
         }
     } else {
         printf("Error: Missing required server argument.\n");
-        print_usage();
+        printUsage();
         return false;
     }
 
-    // Check for mandatory arguments auth file and out dir
+    // check for auth_file and out_dir
     if (strlen(config->auth_file) == 0 || strlen(config->out_dir) == 0) {
         printf("Error: Missing required argument auth_file or out_dir.\n");
-        print_usage();
+        printUsage();
         return false;
+    }
+
+    // load username and password
+    if (!load_auth_file(config->auth_file, config)) {
+        return 1;
     }
 
     return true;

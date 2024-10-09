@@ -24,6 +24,8 @@ struct Config {
     char auth_file[MAX_STR_LEN];
     char mailbox[MAX_STR_LEN];
     char out_dir[MAX_STR_LEN];
+    char username[MAX_STR_LEN];
+    char password[MAX_STR_LEN];
 };
 
 #endif
