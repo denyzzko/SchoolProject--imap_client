@@ -1,6 +1,6 @@
 /**
  * @file main.h
- * @brief Header file for email client using protocol IMAP4rev1
+ * @brief Header file for main.c
  * @author Denis Milistenfer <xmilis00@stud.fit.vutbr.cz>
  * @date 27.9.2024
  */
@@ -9,23 +9,44 @@
 #define MAIN_H
 
 #include <stdbool.h>
+#include <stdlib.h>
 
 #define MAX_STR_LEN 256
 
+// Dynamic string buffer structure
+typedef struct {
+    char *buffer;     // Pointer to the dynamically allocated buffer
+    size_t size;      // Current allocated size of the buffer
+    size_t length;    // Current length of data in the buffer
+} DynamicBuffer;
+
 // Config structure to hold parsed arguments
 struct Config {
-    char server[MAX_STR_LEN];
+    DynamicBuffer *server;
     int port;
     bool use_ssl;
-    char certfile[MAX_STR_LEN];
-    char certdir[MAX_STR_LEN];
+    DynamicBuffer *certfile;
+    DynamicBuffer *certdir;
     bool new_only;
     bool headers_only;
-    char auth_file[MAX_STR_LEN];
-    char mailbox[MAX_STR_LEN];
-    char out_dir[MAX_STR_LEN];
-    char username[MAX_STR_LEN];
-    char password[MAX_STR_LEN];
+    DynamicBuffer *auth_file;
+    DynamicBuffer *mailbox;
+    DynamicBuffer *out_dir;
+    DynamicBuffer *username;
+    DynamicBuffer *password;
 };
+
+// Function to allocate memory for a buffer
+DynamicBuffer* create_buffer(size_t initial_size);
+// Function to reallocate the buffer when more space is needed
+void resize_buffer(DynamicBuffer *buf, size_t new_size);
+// Function to write data into the buffer and resize if needed
+void write_to_buffer(DynamicBuffer *buf, const char *data);
+// Free the dynamic buffer
+void free_buffer(DynamicBuffer *buf);
+// Allocate memory for the Config structure
+void initialize_config(struct Config *config);
+// Free the memory for the Config structure
+void free_config(struct Config *config);
 
 #endif

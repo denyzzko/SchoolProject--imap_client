@@ -1,9 +1,17 @@
+/**
+ * @file connection.c
+ * @brief Manages the creation and handling of raw and secure connections to the server
+ * @author Denis Milistenfer <xmilis00@stud.fit.vutbr.cz>
+ * @date 27.9.2024
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <netdb.h>
 
@@ -31,7 +39,7 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
     // Load certificate file and directory if provided
     if (certfile || certdir) {
         if (SSL_CTX_load_verify_locations(ctx, certfile, certdir) != 1) {
-            fprintf(stderr, "Error loading certificates from file or directory\n");
+            fprintf(stderr, "Error: loading certificates from file or directory failed.\n");
             ERR_print_errors_fp(stderr);
             SSL_CTX_free(ctx);
             return NULL;
@@ -39,7 +47,7 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
     } else {
         // Load default certificates if none provided
         if (!SSL_CTX_set_default_verify_paths(ctx)) {
-            fprintf(stderr, "Error loading default certificate paths\n");
+            fprintf(stderr, "Error: loading default certificate paths failed.\n");
             ERR_print_errors_fp(stderr);
             SSL_CTX_free(ctx);
             return NULL;
@@ -71,6 +79,13 @@ int create_raw_socket(const char *hostname, int port) {
         fprintf(stderr, "Error: Socket creation failed.\n");
         return -1;
     }
+
+    // Set timeout for the socket
+    struct timeval timeout;
+    timeout.tv_sec = 10;
+    timeout.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
 
     // Set server address
     memset(&server_addr, 0, sizeof(server_addr));
@@ -115,7 +130,7 @@ SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
         // Check if the certificate is valid
         long verify_result = SSL_get_verify_result(ssl);
         if (verify_result != X509_V_OK) {
-            printf("Error: Certificate verification failed: %s\n", X509_verify_cert_error_string(verify_result));
+            fprintf(stderr, "Error: Certificate verification failed: %s\n", X509_verify_cert_error_string(verify_result));
             X509_free(cert);
             SSL_free(ssl);
             return NULL;
@@ -131,7 +146,7 @@ SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
         OPENSSL_free(issuer);
         X509_free(cert);
     } else {
-        fprintf(stderr, "No server certificate found.\n");
+        fprintf(stderr, "Error: No server certificate found.\n");
         SSL_free(ssl);
         return NULL;
     }

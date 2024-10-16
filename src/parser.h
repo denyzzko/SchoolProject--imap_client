@@ -1,3 +1,10 @@
+/**
+ * @file parser.h
+ * @brief Header file for parser.c 
+ * @author Denis Milistenfer <xmilis00@stud.fit.vutbr.cz>
+ * @date 27.9.2024
+ */
+
 #ifndef PARSER_H
 #define PARSER_H
 
