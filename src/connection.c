@@ -36,26 +36,46 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
         return NULL;
     }
 
-    // Load certificate file and directory if provided
-    if (certfile || certdir) {
-        if (SSL_CTX_load_verify_locations(ctx, certfile, certdir) != 1) {
-            fprintf(stderr, "Error: loading certificates from file or directory failed.\n");
+    // Load the specified certificate file, if provided
+    if (certfile && strlen(certfile) > 0) {
+        if (SSL_CTX_load_verify_locations(ctx, certfile, NULL) != 1) {
+            fprintf(stderr, "Error: loading certificate from file %s failed.\n", certfile);
             ERR_print_errors_fp(stderr);
             SSL_CTX_free(ctx);
             return NULL;
+        } else {
+            printf("Loaded certificate file: %s\n", certfile);
         }
-    } else {
-        // Load default certificates if none provided
+    }
+
+    // Load certificates from the specified directory, if provided
+    if (certdir && strlen(certdir) > 0) {
+        if (SSL_CTX_load_verify_locations(ctx, NULL, certdir) != 1) {
+            fprintf(stderr, "Error: loading certificates from directory %s failed.\n", certdir);
+            ERR_print_errors_fp(stderr);
+            SSL_CTX_free(ctx);
+            return NULL;
+        } else {
+            printf("Loaded certificates from directory: %s\n", certdir);
+        }
+    }
+
+    // If neither a file nor a directory is provided, use the default paths
+    if ((!certfile || strlen(certfile) == 0) && (!certdir || strlen(certdir) == 0)) {
         if (!SSL_CTX_set_default_verify_paths(ctx)) {
             fprintf(stderr, "Error: loading default certificate paths failed.\n");
             ERR_print_errors_fp(stderr);
             SSL_CTX_free(ctx);
             return NULL;
+        } else {
+            printf("Loaded default certificate paths.\n");
         }
     }
 
     return ctx;
 }
+
+
 
 int create_raw_socket(const char *hostname, int port) {
     int sock ;

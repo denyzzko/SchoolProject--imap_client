@@ -87,7 +87,7 @@ bool ParseArguments(int argc, char* argv[], struct Config *config) {
                 break;
             case 'C':
                 config->certdir->length = 0;
-                memset(config->mailbox->buffer, 0, config->mailbox->size);
+                memset(config->certdir->buffer, 0, config->certdir->size);
                 write_to_buffer(config->certdir, optarg);
                 break;
             case 'n':
