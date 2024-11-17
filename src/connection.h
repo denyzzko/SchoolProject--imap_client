@@ -12,19 +12,19 @@
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 
-// function to initialize openssl
+// Function to initialize openssl
 void initialize_openssl();
 
-// function to create ssl context (for optional certificate file and directory)
-SSL_CTX* create_ssl_context(const char *certfile, const char *certdir);
-
-// function to create socket
+// Function to create socket
 int create_raw_socket(const char *hostname, int port);
 
-// function to create a secure ssl connection
+// Function to create ssl context (for optional certificate file and directory)
+SSL_CTX* create_ssl_context(const char *certfile, const char *certdir);
+
+// Function to create a secure connection with raw socket and SSL context
 SSL* create_secure_connection(int sockfd, SSL_CTX *ctx);
 
-// function to close a secure connection
+// Function to close a secure SSL connection and free resources
 void close_secure_connection(SSL *ssl, SSL_CTX *ctx);
 
 #endif

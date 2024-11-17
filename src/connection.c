@@ -5,6 +5,8 @@
  * @date 27.9.2024
  */
 
+#define _POSIX_C_SOURCE 200112L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,12 +28,100 @@ void initialize_openssl() {
     OpenSSL_add_all_algorithms();
 }
 
+int create_raw_socket(const char *hostname, int port) {
+    int sock;
+    struct addrinfo hints, *res, *p;
+    char port_str[6];
+    int status;
+    char ipstr[INET6_ADDRSTRLEN];      //for pirnting ip adress so delete !!!!!!!!!!
+
+    // Convert port number to string
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC; // Both ipv4 and ipv6
+    hints.ai_socktype = SOCK_STREAM; // TCP sockets
+
+    // Resolve hostname to an IP address
+    if ((status = getaddrinfo(hostname, port_str, &hints, &res)) != 0) {
+        // Hostname resolution failed
+        fprintf(stderr, "Error: getaddrinfo failed: %s\n", gai_strerror(status));
+        return -1;
+    }
+    
+    //for pirnting ip adress so delete !!!!!!!!!!***************************************
+    printf("Resolved IP addresses for %s:\n", hostname);
+    // Print resolved IP addresses
+    for (p = res; p != NULL; p = p->ai_next) {
+        void *addr;
+        const char *ipver;
+
+        // Determine whether it's IPv4 or IPv6
+        if (p->ai_family == AF_INET) { // IPv4
+            struct sockaddr_in *ipv4 = (struct sockaddr_in *)p->ai_addr;
+            addr = &(ipv4->sin_addr);
+            ipver = "IPv4";
+        } else if (p->ai_family == AF_INET6) { // IPv6
+            struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)p->ai_addr;
+            addr = &(ipv6->sin6_addr);
+            ipver = "IPv6";
+        } else {
+            continue;
+        }
+
+        // Convert the IP address to a string
+        inet_ntop(p->ai_family, addr, ipstr, sizeof ipstr);
+        printf("  %s: %s\n", ipver, ipstr);
+    }
+    //******************************************************************************************
+
+    // Loop through results and attemp to connect
+    for (p = res; p != NULL; p = p->ai_next) {
+        // Create socket
+        if ((sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+            // Socket creation failed, skip to next adress
+            continue;
+        }
+
+        // Set socket timeouts for 10 seconds
+        struct timeval timeout;
+        timeout.tv_sec = 10;
+        timeout.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+
+        // Connect to the server
+        if (connect(sock, p->ai_addr, p->ai_addrlen) == -1) {
+            // Connection failed
+            close(sock);
+            continue;
+        }
+
+        // Successfully connected
+        break;
+    }
+
+    // Free address info structure
+    freeaddrinfo(res);
+
+    if (p == NULL) {
+        // No connection successfully established
+        fprintf(stderr, "Error: Failed to connect to %s on port %d\n", hostname, port);
+        return -1;
+    }
+
+    printf("Connected to %s on port %d\n", hostname, port);
+    // Return the socket file descriptor
+    return sock;
+}
+
 SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
     SSL_CTX *ctx;
 
     // Create an SSL context for TLS client
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) {
+        // SSL context creation failed
         ERR_print_errors_fp(stderr);
         return NULL;
     }
@@ -39,6 +129,7 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
     // Load the specified certificate file, if provided
     if (certfile && strlen(certfile) > 0) {
         if (SSL_CTX_load_verify_locations(ctx, certfile, NULL) != 1) {
+            // Loading failed
             fprintf(stderr, "Error: loading certificate from file %s failed.\n", certfile);
             ERR_print_errors_fp(stderr);
             SSL_CTX_free(ctx);
@@ -48,9 +139,10 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
         }
     }
 
-    // Load certificates from the specified directory, if provided
+    // Load certificates from the directory
     if (certdir && strlen(certdir) > 0) {
         if (SSL_CTX_load_verify_locations(ctx, NULL, certdir) != 1) {
+            // Loading failed
             fprintf(stderr, "Error: loading certificates from directory %s failed.\n", certdir);
             ERR_print_errors_fp(stderr);
             SSL_CTX_free(ctx);
@@ -60,101 +152,40 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
         }
     }
 
-    // If neither a file nor a directory is provided, use the default paths
-    if ((!certfile || strlen(certfile) == 0) && (!certdir || strlen(certdir) == 0)) {
-        if (!SSL_CTX_set_default_verify_paths(ctx)) {
-            fprintf(stderr, "Error: loading default certificate paths failed.\n");
-            ERR_print_errors_fp(stderr);
-            SSL_CTX_free(ctx);
-            return NULL;
-        } else {
-            printf("Loaded default certificate paths.\n");
-        }
-    }
-
+    // Return created SSL context
     return ctx;
-}
-
-
-
-int create_raw_socket(const char *hostname, int port) {
-    int sock ;
-    struct sockaddr_in server_addr;
-    struct hostent *servent;        // Structure to hold server address
-
-    // Resolve the hostname to an IP address using gethostbyname()
-    if ((servent = gethostbyname(hostname)) == NULL) {
-        fprintf(stderr, "Error: Hostname resolution failed or IPv6 address is used which is not supported.\n");
-        return -1;
-    }
-
-    // Ensure that the address is IPv4
-    if (servent->h_addrtype != AF_INET) {
-        fprintf(stderr, "Error: Only IPv4 addresses are supported.\n");
-        return -1;
-    }
-
-    // Create a socket (AF_INET for IPv4, SOCK_STREAM for TCP)
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-        fprintf(stderr, "Error: Socket creation failed.\n");
-        return -1;
-    }
-
-    // Set timeout for the socket
-    struct timeval timeout;
-    timeout.tv_sec = 10;
-    timeout.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
-
-    // Set server address
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-
-    // Copy the resolved IP address to the server address structure
-    memcpy(&server_addr.sin_addr, servent->h_addr_list[0], servent->h_length);
-
-    // Connect to the server
-    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        fprintf(stderr, "Error: Connection failed.\n");
-        close(sock);
-        return -1;
-    }
-
-    printf("Connected to %s on port %d\n", hostname, port);
-    return sock; // Return the socket file descriptor
 }
 
 SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
     SSL *ssl;
 
-    // Create an SSL object and bind it to the raw socket
+    // Create SSL object and bind it to raw socket
     ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sockfd);
 
     // Perform the SSL handshake
     if (SSL_connect(ssl) <= 0) {
+        // Handshake failed
         ERR_print_errors_fp(stderr);
         SSL_free(ssl);
         return NULL;
     }
-
-    printf("SSL connection established\n");
 
     // Get the server's certificate
     X509 *cert = SSL_get_peer_certificate(ssl);
     if (cert) {
         printf("Server's certificate was received.\n");
 
-        // Check if the certificate is valid
+        // Check if certificate is valid
         long verify_result = SSL_get_verify_result(ssl);
         if (verify_result != X509_V_OK) {
+            // Certificate verification failed
             fprintf(stderr, "Error: Certificate verification failed: %s\n", X509_verify_cert_error_string(verify_result));
             X509_free(cert);
             SSL_free(ssl);
             return NULL;
         }
+        printf("Server's certificate verified.\n");
 
         // Optionally: Print certificate information (subject, issuer, etc.)
         char *subject = X509_NAME_oneline(X509_get_subject_name(cert), NULL, 0);
@@ -162,15 +193,18 @@ SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
         printf("Certificate Subject: %s\n", subject);
         printf("Certificate Issuer: %s\n", issuer);
 
+        // Free memory allocated for certificates
         OPENSSL_free(subject);
         OPENSSL_free(issuer);
         X509_free(cert);
     } else {
+        // No certificate found
         fprintf(stderr, "Error: No server certificate found.\n");
         SSL_free(ssl);
         return NULL;
     }
-
+    // Return SSL object for secure communication
+    printf("SSL connection established\n");
     return ssl;
 }
 

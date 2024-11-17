@@ -10,11 +10,11 @@
 
 #include "main.h"
 
-// helper function to load username and password
+// Helper function to load username and password
 bool load_auth_file(const char *auth_file, struct Config *config);
-// function that prints usage
+// Function that prints usage
 void printUsage();
-// function to parse input arguments
+// Function to parse input arguments and populate Config structure
 bool ParseArguments(int argc, char* argv[], struct Config *config);
 
 #endif

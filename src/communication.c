@@ -2,7 +2,7 @@
  * @file communication.c
  * @brief Implements secure and unsecure IMAP communication by handling the flow of IMAP commands and server responses over both SSL-secured and plain sockets
  * @author Denis Milistenfer <xmilis00@stud.fit.vutbr.cz>
- * @date 13.10.2024
+ * @date 26.10.2024
  */
 
 #include <stdio.h>
@@ -15,15 +15,15 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
-#include <errno.h>  // For errno
+#include <errno.h>
 
 #include "communication.h"
 #include "main.h"
 
-bool extract_uids(const char *search_response, char *all_uids, size_t uids_size) {
+bool extract_uids(const char *search_response, DynamicBuffer *all_uids) {
     char *search_line = strstr(search_response, "* SEARCH ");
     if (!search_line) {
-        printf("No new emails found.\n");
+        // No emails found
         return true;
     }
 
@@ -34,7 +34,7 @@ bool extract_uids(const char *search_response, char *all_uids, size_t uids_size)
     char *uid = strtok(search_line, " \r\n");
     bool uid_found = false;
     while (uid) {
-        // Ensure the UID is numeric (skip invalid UIDs like "A003" or "OK")
+        // Ensure the UID is numeric
         bool is_numeric = true;
         for (char *p = uid; *p; p++) {
             if (!isdigit(*p)) {
@@ -45,11 +45,9 @@ bool extract_uids(const char *search_response, char *all_uids, size_t uids_size)
 
         // If numeric, append to the all_uids buffer
         if (is_numeric) {
-            strncat(all_uids, uid, uids_size - strlen(all_uids) - 1);  // Ensure no overflow
-            strncat(all_uids, " ", uids_size - strlen(all_uids) - 1);  // Add a space between UIDs
+            write_to_buffer(all_uids, uid);
+            write_to_buffer(all_uids, " ");  // Add space separator
             uid_found = true;
-        } else {
-            printf("Skipping invalid UID: %s\n", uid);
         }
 
         // Move to the next token
@@ -57,33 +55,35 @@ bool extract_uids(const char *search_response, char *all_uids, size_t uids_size)
     }
 
     if (!uid_found) {
+        // No valid UIDs found
         fprintf(stderr, "Error: No valid UIDs found in SEARCH response.\n");
-        return false;  // Returning false to indicate failure
+        return false;
     } 
 
-    // Print all valid UIDs
-    printf("Valid UIDs: %s\n", all_uids);
-
-    return strlen(all_uids) > 0;
+    // Return true if at least one UID was found
+    return all_uids->length > 0;
 }
 
 bool store_uidvalidity(const char *file_path, const char *uidvalidity) {
+    // Open file to write
     FILE *file = fopen(file_path, "w");
     if (!file) {
+        // Opening file failed
         fprintf(stderr, "Error: opening file to store UIDValidity failed.\n");
         return false;
     }
+    // Store value and close file
     fprintf(file, "%s\n", uidvalidity);
     fclose(file);
     return true;
 }
 
-// Function to compare UIDValidity with stored value
 bool compare_uidvalidity(const char *file_path, const char *new_uidvalidity) {
     FILE *file = fopen(file_path, "r");
     if (!file) {
-        // File doesn't exist, so create it and return false to signal full download
+        // File doesn't exist, create it
         store_uidvalidity(file_path, new_uidvalidity);
+        // Return false to signal full download
         return false;
     }
 
@@ -91,80 +91,124 @@ bool compare_uidvalidity(const char *file_path, const char *new_uidvalidity) {
     fgets(stored_uidvalidity, sizeof(stored_uidvalidity), file);
     fclose(file);
 
-    // Remove the newline character at the end of the stored UIDValidity
+    // Remove the \n at the end of stored UIDValidity
     size_t len = strlen(stored_uidvalidity);
     if (len > 0 && stored_uidvalidity[len - 1] == '\n') {
         stored_uidvalidity[len - 1] = '\0';
     }
 
-    // Compare the stored and new UIDValidity values
+    // Compare the stored and new values
     if (strcmp(stored_uidvalidity, new_uidvalidity) == 0) {
-        printf("UID IS SAME\n");
-        return true; // UIDValidity is the same, no need to download everything
+        // UIDValidity is the same, no need to download everything
+        return true;
     } else {
-        // UIDValidity has changed, so update the file and return false
-        printf("UID IS NOT SAME\n");
+        // UIDValidity has changed, update file
         store_uidvalidity(file_path, new_uidvalidity);
+        // Return false to signal full download
         return false;
     }
 }
 
+size_t extract_email_size(const char *response) {
+    const char *start = strchr(response, '{');
+    if (!start) return 0; // If '{' is not found, return 0 (error case)
+
+    size_t size;
+    if (sscanf(start, "{%zu}", &size) == 1) {
+        return size; // Return the size of the email content
+    }
+    return 0; // Error parsing size
+}
+
+int find_email_start(const char* response) {
+    char* start = strchr(response, '}');
+    if (start != NULL) {
+        // Check for CRLF after }
+        if (*(start + 1) == '\r' && *(start + 2) == '\n') {
+            // Skipping '}CRLF'
+            return (start - response) + 3;
+        } else {
+            // Skipping just '}'
+            return (start - response) + 1;
+        }
+    }
+    // } not found
+    return -1;
+}
+
 bool loginSecure(SSL *ssl, DynamicBuffer *username, DynamicBuffer *password) {
-    // Create a DynamicBuffer for the login command
-    size_t login_cmd_size = 10 + username->length + password->length + 3; // "B001 LOGIN ", " ", "\r\n"
+    // Construct LOGIN command
+    size_t login_cmd_size = 10 + username->length + password->length + 3; // B001 LOGIN + ... + \r\n
     DynamicBuffer *login_cmd = create_buffer(login_cmd_size);
 
-    // Format the login command dynamically
     snprintf(login_cmd->buffer, login_cmd->size, "B001 LOGIN %s %s\r\n", username->buffer, password->buffer);
-    login_cmd->length = strlen(login_cmd->buffer);  // Update the length after formatting
+    login_cmd->length = strlen(login_cmd->buffer);
 
-    // Send the login command using SSL
+    // Send LOGIN command using SSL
     if (SSL_write(ssl, login_cmd->buffer, login_cmd->length) <= 0) {
+        // Sending LOGIN command failed
         fprintf(stderr, "Error: SSL_write() for LOGIN command failed.\n");
         free_buffer(login_cmd);
         return false;
     }
 
-    printf("Sent login command: %s", login_cmd->buffer);
+    printf("Sent login command:\n%s\n", login_cmd->buffer);
 
     // Free the login command buffer
     free_buffer(login_cmd);
 
-    // Use DynamicBuffer for the server's response
-    DynamicBuffer *response_buffer = create_buffer(512);  // Initial buffer size
+    // Recieve server response
+    DynamicBuffer *response_buffer = create_buffer(512);
     int bytes;
 
-    // Loop to handle potentially multi-part server responses
+    // Loop to handle potential multi part server response
     while ((bytes = SSL_read(ssl, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1)) > 0) {
         response_buffer->length += bytes;
         response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
 
+        printf("Server login response:\n%s\n", response_buffer->buffer);
+        
+        // Check for server completion responses
         if (strstr(response_buffer->buffer, "B001 OK") != NULL) {
-            printf("Login successful\n");
-            free_buffer(response_buffer);
-            return true;  // Success
+            // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+            // Check if the last two characters in the buffer are \r\n
+            if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                // Entire OK line has been received
+                free_buffer(response_buffer);
+                return true;  // Success
+            } 
+            else {
+                // Not at end of response
+                // Resize response buffer if necessary
+                if (response_buffer->length + 1 >= response_buffer->size) {
+                    resize_buffer(response_buffer, response_buffer->size * 2);
+                }
+                continue;
+            }
         } else if (strstr(response_buffer->buffer, "B001 NO") != NULL) {
             fprintf(stderr, "Error: LOGIN failure - username or password rejected. (server's response NO)\n");
             free_buffer(response_buffer);
-            return false;  // Failure
+            return false;  // Fail
         } else if (strstr(response_buffer->buffer, "B001 BAD") != NULL) {
             fprintf(stderr, "Error: LOGIN failure - command unknown or arguments invalid. (server's response BAD)\n");
             free_buffer(response_buffer);
-            return false;  // Failure
+            return false;  // Fail
         }
 
-        // Resize the response buffer if necessary
+        // Resize response buffer if necessary
         if (response_buffer->length + 1 >= response_buffer->size) {
             resize_buffer(response_buffer, response_buffer->size * 2);
         }
     }
 
     if (bytes <= 0) {
+        // Recieving response failed
         fprintf(stderr, "Error: SSL_read() failed for LOGIN response.\n");
         free_buffer(response_buffer);
         return false;
     }
 
+    // When program got here some other unexpected failure happened
     free_buffer(response_buffer);
     fprintf(stderr, "Error: Unexpected failure in LOGIN command. (possibly wrong server response or connection failure)\n");
     return false;
@@ -172,16 +216,16 @@ bool loginSecure(SSL *ssl, DynamicBuffer *username, DynamicBuffer *password) {
 
 
 bool loginUnsecure(int sockfd, DynamicBuffer *username, DynamicBuffer *password) {
-    // Create a DynamicBuffer for the login command
-    size_t login_cmd_size = 10 + username->length + password->length + 3; // "A001 LOGIN ", " ", "\r\n"
+    /// Construct LOGIN command
+    size_t login_cmd_size = 10 + username->length + password->length + 3; // A001 LOGIN + ... + \r\n
     DynamicBuffer *login_cmd = create_buffer(login_cmd_size);
 
-    // Format the login command dynamically
     snprintf(login_cmd->buffer, login_cmd->size, "A001 LOGIN %s %s\r\n", username->buffer, password->buffer);
-    login_cmd->length = strlen(login_cmd->buffer);  // Update the length after formatting
+    login_cmd->length = strlen(login_cmd->buffer);
 
-    // Send the login command using the unsecure socket
+    // Send LOGIN command using unsecure socket
     if (send(sockfd, login_cmd->buffer, login_cmd->length, 0) < 0) {
+        // Sending LOGIN command failed
         fprintf(stderr, "Error: send() for LOGIN command failed.\n");
         free_buffer(login_cmd);
         return false;
@@ -192,162 +236,143 @@ bool loginUnsecure(int sockfd, DynamicBuffer *username, DynamicBuffer *password)
     // Free the login command buffer
     free_buffer(login_cmd);
 
-    // Use DynamicBuffer for the server's response
-    DynamicBuffer *response_buffer = create_buffer(512);  // Initial buffer size
+    // Recieve server response
+    DynamicBuffer *response_buffer = create_buffer(512);
     int bytes;
 
-    // Loop to handle potentially multi-part server responses
+    // Loop to handle potential multi part server response
     while ((bytes = recv(sockfd, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1, 0)) > 0) {
         response_buffer->length += bytes;
         response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
 
         printf("Server login response: %s\n", response_buffer->buffer);
 
-        // Check for success or failure in the response
+        // Check for server completion responses
         if (strstr(response_buffer->buffer, "A001 OK") != NULL) {
-            printf("Login successful\n");
-            free_buffer(response_buffer);
-            return true;  // Success
+            // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+            // Check if the last two characters in the buffer are \r\n
+            if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                // Entire OK line has been received
+                free_buffer(response_buffer);
+                return true;  // Success
+            } 
+            else {
+                // Not at end of response
+                // Resize response buffer if necessary
+                if (response_buffer->length + 1 >= response_buffer->size) {
+                    resize_buffer(response_buffer, response_buffer->size * 2);
+                }
+                continue;
+            }
         } else if (strstr(response_buffer->buffer, "A001 NO") != NULL) {
             fprintf(stderr, "Error: LOGIN failure - username or password rejected. (server's response NO)\n");
             free_buffer(response_buffer);
-            return false;  // Failure
+            return false;  // Fail
         } else if (strstr(response_buffer->buffer, "A001 BAD") != NULL) {
             fprintf(stderr, "Error: LOGIN failure - command unknown or arguments invalid. (server's response BAD)\n");
             free_buffer(response_buffer);
-            return false;  // Failure
+            return false;  // Fail
         }
 
-        // Resize the response buffer if necessary
+        // Resize response buffer if necessary
         if (response_buffer->length + 1 >= response_buffer->size) {
             resize_buffer(response_buffer, response_buffer->size * 2);
         }
     }
 
-    // Error handling if recv returns -1 (error)
     if (bytes < 0) {
+        // Recieving response failed
         fprintf(stderr, "Error: recv() for LOGIN response failed.\n");
         free_buffer(response_buffer);
         return false;
     }
 
+    // When program got here some other unexpected failure happened
     free_buffer(response_buffer);
     fprintf(stderr, "Error: Unexpected failure in LOGIN command. (possibly wrong server response or connection failure)\n");
     return false;
 }
 
 bool selectSecure(SSL *ssl, DynamicBuffer *mailbox, DynamicBuffer *uidvalidity) {
-    // Prepare the SELECT command
+    // Construct SELECT command
     char select_cmd[512];
     snprintf(select_cmd, sizeof(select_cmd), "B002 SELECT %s\r\n", mailbox->buffer);
 
-    // Send the SELECT command using SSL
+    // Send SELECT command using SSL
     if (SSL_write(ssl, select_cmd, strlen(select_cmd)) <= 0) {
         fprintf(stderr, "Error: SSL_write() for SELECT command failed.\n");
         return false;
     }
 
-    printf("Sent select command: %s", select_cmd);
+    printf("Sent select command:\n%s\n", select_cmd);
 
-    // Create a dynamic buffer for the server's response
+    // Recieve server response
     DynamicBuffer *response_buffer = create_buffer(512);
     int bytes;
 
-    // Read the server's response
+    // Loop to handle potential multi part server response
     while ((bytes = SSL_read(ssl, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1)) > 0) {
         response_buffer->length += bytes;
         response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
 
-        printf("Server select response: %s\n", response_buffer->buffer);
+        printf("Server select response:\n%s\n", response_buffer->buffer);
 
-        // Check for successful response
+        // Check for server completion responses
         if (strstr(response_buffer->buffer, "B002 OK") != NULL) {
-            char *uidvalidity_ptr = strstr(response_buffer->buffer, "[UIDVALIDITY ");
-            if (uidvalidity_ptr) {
-                sscanf(uidvalidity_ptr, "[UIDVALIDITY %[^]]]", uidvalidity->buffer);
-                uidvalidity->length = strlen(uidvalidity->buffer);
-                printf("Extracted UIDVALIDITY: '%s'\n", uidvalidity->buffer);
-            } else {
-                fprintf(stderr, "Error: UIDValidity not found in SELECT response.\n");
+            // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+            // Check if the last two characters in the buffer are \r\n
+            if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                // Entire OK line has been received
+                // Extract UIDVALIDITY from response
+                char *uidvalidity_ptr = strstr(response_buffer->buffer, "[UIDVALIDITY ");
+                if (uidvalidity_ptr) {
+                    sscanf(uidvalidity_ptr, "[UIDVALIDITY %[^]]]", uidvalidity->buffer);
+                    uidvalidity->length = strlen(uidvalidity->buffer);
+                } else {
+                    fprintf(stderr, "Error: UIDValidity not found in SELECT response.\n");
+                    free_buffer(response_buffer);
+                    return false;
+                }
                 free_buffer(response_buffer);
-                return false;
-            }
-            free_buffer(response_buffer);
-            return true;
+                return true; // Success
+                } 
+            else {
+                // Not at end of response
+                // Resize response buffer if necessary
+                if (response_buffer->length + 1 >= response_buffer->size) {
+                    resize_buffer(response_buffer, response_buffer->size * 2);
+                }
+                continue;
+            } 
         } else if (strstr(response_buffer->buffer, "B002 NO") != NULL) {
             fprintf(stderr, "Error: SELECT command failed. (server's response NO)\n");
             free_buffer(response_buffer);
-            return false;
+            return false; // Fail
         } else if (strstr(response_buffer->buffer, "B002 BAD") != NULL) {
             fprintf(stderr, "Error: SELECT command failed. (server's response BAD)\n");
             free_buffer(response_buffer);
-            return false;
+            return false; // Fail
         }
 
-        // Resize the response buffer if needed
+        // Resize response buffer if needed
         if (response_buffer->length + 1 >= response_buffer->size) {
             resize_buffer(response_buffer, response_buffer->size * 2);
         }
     }
 
     if (bytes <= 0) {
+        // Recieving response failed
         fprintf(stderr, "Error: SSL_read() failed for SELECT response.\n");
         free_buffer(response_buffer);
         return false;
     }
 
+    // When program got here some other unexpected failure happened
     fprintf(stderr, "Error: Unexpected failure in SELECT command. (possibly wrong server response or connection failure)\n");
     free_buffer(response_buffer);
     return false;
 }
 
-bool listMailboxesUnsecure(int sockfd) {
-    // Create a dynamic buffer for the LIST command
-    DynamicBuffer *list_cmd = create_buffer(32);
-    snprintf(list_cmd->buffer, list_cmd->size, "A003 LIST \"\" \"*\"\r\n");
-    list_cmd->length = strlen(list_cmd->buffer);
-
-    // Send the LIST command
-    if (send(sockfd, list_cmd->buffer, list_cmd->length, 0) < 0) {
-        fprintf(stderr, "Error: send() for LIST command failed.\n");
-        free_buffer(list_cmd);
-        return false;
-    }
-
-    printf("Sent list command: '%s'\n", list_cmd->buffer);
-    free_buffer(list_cmd);
-
-    // Create a dynamic buffer for the server's response
-    DynamicBuffer *response_buffer = create_buffer(1024);
-    int bytes;
-
-    // Read the server's response
-    while ((bytes = recv(sockfd, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1, 0)) > 0) {
-        response_buffer->length += bytes;
-        response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
-
-        printf("Server LIST response: %s\n", response_buffer->buffer);
-
-        // Check for "A003 OK" indicating the end of the response
-        if (strstr(response_buffer->buffer, "A003 OK") != NULL) {
-            printf("Mailbox listing completed.\n");
-            free_buffer(response_buffer);
-            return true;
-        }
-
-        // Resize the buffer if necessary
-        if (response_buffer->length + 1 >= response_buffer->size) {
-            resize_buffer(response_buffer, response_buffer->size * 2);
-        }
-    }
-
-    if (bytes <= 0) {
-        fprintf(stderr, "Error: recv() failed for LIST response.\n");
-    }
-
-    free_buffer(response_buffer);
-    return false;
-}
 /*
 bool selectUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *uidvalidity) {
     // Create a dynamic buffer for the SELECT command
@@ -418,11 +443,11 @@ bool selectUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *uidvalidi
 */
 
 bool selectUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *uidvalidity) {
-    // Prepare the SELECT command
+    // Construct SELECT command
     char select_cmd[512];
     snprintf(select_cmd, sizeof(select_cmd), "A002 SELECT %s\r\n", mailbox->buffer);
 
-    // Send the SELECT command
+    // Send SELECT command using unsecure socket
     if (send(sockfd, select_cmd, strlen(select_cmd), 0) < 0) {
         fprintf(stderr, "Error: send() for SELECT command failed.\n");
         return false;
@@ -431,51 +456,66 @@ bool selectUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *uidvalidi
     printf("Sent select command: %s\n", select_cmd);
 
     
-    // Create a dynamic buffer for the server's response
+    // Recieve server response
     DynamicBuffer *response_buffer = create_buffer(512);
     int bytes;
 
-    // Loop to handle potentially multi-part server responses
+    // Loop to handle potential multi part server response
     while ((bytes = recv(sockfd, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1, 0)) > 0) {
         response_buffer->length += bytes;
         response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
 
         printf("Server select response: %s\n", response_buffer->buffer);
 
-        // Check if the server responded with OK
+        // Check for server completion responses
         if (strstr(response_buffer->buffer, "A002 OK") != NULL) {
-            char *uidvalidity_ptr = strstr(response_buffer->buffer, "[UIDVALIDITY ");
-            if (uidvalidity_ptr) {
-                sscanf(uidvalidity_ptr, "[UIDVALIDITY %[^]]]", uidvalidity->buffer);
-                uidvalidity->length = strlen(uidvalidity->buffer);
-                printf("Extracted UIDVALIDITY: '%s'\n", uidvalidity->buffer);
-            } else {
-                fprintf(stderr, "Error: UIDValidity not found in SELECT response.\n");
+            // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+            // Check if the last two characters in the buffer are \r\n
+            if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                // Entire OK line has been received
+                // Extract UIDVALIDITY from response
+                char *uidvalidity_ptr = strstr(response_buffer->buffer, "[UIDVALIDITY ");
+                if (uidvalidity_ptr) {
+                    sscanf(uidvalidity_ptr, "[UIDVALIDITY %[^]]]", uidvalidity->buffer);
+                    uidvalidity->length = strlen(uidvalidity->buffer);
+                } else {
+                    fprintf(stderr, "Error: UIDValidity not found in SELECT response.\n");
+                    free_buffer(response_buffer);
+                    return false;
+                }
                 free_buffer(response_buffer);
-                return false;
+                return true; // Success
+                } 
+            else {
+                // Not at end of response
+                // Resize response buffer if necessary
+                if (response_buffer->length + 1 >= response_buffer->size) {
+                    resize_buffer(response_buffer, response_buffer->size * 2);
+                }
+                continue;
             }
-            free_buffer(response_buffer);
-            return true;
         } else if (strstr(response_buffer->buffer, "A002 NO") != NULL) {
             fprintf(stderr, "Error: SELECT command failed. (server's response NO)\n");
-            break;
+            break; // Fail
         } else if (strstr(response_buffer->buffer, "A002 BAD") != NULL) {
             fprintf(stderr, "Error: SELECT command failed. (server's response BAD)\n");
-            break;
+            break; // Fail
         }
 
-        // Resize the response buffer if necessary
+        // Resize response buffer if necessary
         if (response_buffer->length + 1 >= response_buffer->size) {
             resize_buffer(response_buffer, response_buffer->size * 2);
         }
     }
 
     if (bytes < 0) {
+        // Recieving response failed
         fprintf(stderr, "Error: recv() failed for SELECT response.\n");
         free_buffer(response_buffer);
         return false;
     }
 
+    // When program got here some other unexpected failure happened
     fprintf(stderr, "Error: Unexpected failure in SELECT command. (possibly wrong server response or connection failure)\n");
     free_buffer(response_buffer);
     return false;
@@ -483,68 +523,81 @@ bool selectUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *uidvalidi
 
 
 bool uidSearchSecure(SSL *ssl, bool new_only, DynamicBuffer *response_buffer) {
-    // Static buffer for the SEARCH command
+    // Construct SEARCH command
     char search_cmd[64];
-
-    // Prepare the correct SEARCH command
     if (new_only) {
-        snprintf(search_cmd, sizeof(search_cmd), "B003 UID SEARCH UNSEEN\r\n");
+        snprintf(search_cmd, sizeof(search_cmd), "B003 UID SEARCH NEW\r\n");
     } else {
         snprintf(search_cmd, sizeof(search_cmd), "B003 UID SEARCH ALL\r\n");
     }
 
-    // Send the SEARCH command
+    // Send SEARCH command using SSL
     if (SSL_write(ssl, search_cmd, strlen(search_cmd)) <= 0) {
         fprintf(stderr, "Error: SSL_write() for SEARCH command failed.\n");
         return false;
     }
 
-    printf("Sent UID SEARCH command: %s", search_cmd);
+    printf("Sent UID SEARCH command:\n%s\n", search_cmd);
 
     int bytes;
-    // Read the server's response using the dynamic response buffer
+    // Loop to handle potential multi part server response
     while ((bytes = SSL_read(ssl, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1)) > 0) {
         response_buffer->length += bytes;
         response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
 
-        // Check if the response is OK or an error
+        printf("Server select response:\n%s\n", response_buffer->buffer);
+
+        // Check for server completion responses
         if (strstr(response_buffer->buffer, "B003 OK") != NULL) {
-            return true;
+            // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+            // Check if the last two characters in the buffer are \r\n
+            if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                // Entire OK line has been received
+                return true; // Success
+                } 
+            else {
+                // Not at end of response
+                // Resize response buffer if necessary
+                if (response_buffer->length + 1 >= response_buffer->size) {
+                    resize_buffer(response_buffer, response_buffer->size * 2);
+                }
+                continue;
+            }
         } else if (strstr(response_buffer->buffer, "B003 NO") != NULL) {
             fprintf(stderr, "Error: UID SEARCH command error. (server's response NO)\n");
-            return false;
+            return false; // Fail
         } else if (strstr(response_buffer->buffer, "B003 BAD") != NULL) {
             fprintf(stderr, "Error: UID SEARCH command error. (server's response BAD)\n");
-            return false;
+            return false; // Fail
         }
 
-        // Resize the buffer if necessary
+        // Resize buffer if necessary
         if (response_buffer->length + 1 >= response_buffer->size) {
             resize_buffer(response_buffer, response_buffer->size * 2);
         }
     }
 
     if (bytes <= 0) {
+        // Recieving response failed
         fprintf(stderr, "Error: SSL_read() failed for SEARCH command.\n");
         return false;
     }
 
+    // When program got here some other unexpected failure happened
     fprintf(stderr, "Error: Unexpected failure in SEARCH command. (possibly wrong server response or connection failure)\n");
     return false;
 }
 
 bool uidSearchUnsecure(int sockfd, bool new_only, DynamicBuffer *response_buffer) {
-    // Static buffer for the SEARCH command
+    /// Construct SEARCH command
     char search_cmd[64];
-
-    // Prepare the correct SEARCH command
     if (new_only) {
-        snprintf(search_cmd, sizeof(search_cmd), "A003 UID SEARCH UNSEEN\r\n");
+        snprintf(search_cmd, sizeof(search_cmd), "A003 UID SEARCH NEW\r\n");
     } else {
         snprintf(search_cmd, sizeof(search_cmd), "A003 UID SEARCH ALL\r\n");
     }
 
-    // Send the SEARCH command
+    // Send SEARCH command using unsecure socket
     if (send(sockfd, search_cmd, strlen(search_cmd), 0) < 0) {
         fprintf(stderr, "Error: send() for UID SEARCH command failed.\n");
         return false;
@@ -553,75 +606,89 @@ bool uidSearchUnsecure(int sockfd, bool new_only, DynamicBuffer *response_buffer
     printf("Sent UID SEARCH command: %s", search_cmd);
 
     int bytes;
-    // Read the server's response into the dynamic response buffer
+    // Loop to handle potential multi part server response
     while ((bytes = recv(sockfd, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1, 0)) > 0) {
         response_buffer->length += bytes;
         response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
 
-        // Check if the response is OK or an error
+        // Check for server completion responses
         if (strstr(response_buffer->buffer, "A003 OK") != NULL) {
-            return true;
+            // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+            // Check if the last two characters in the buffer are \r\n
+            if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                // Entire OK line has been received
+                return true; // Success
+                } 
+            else {
+                // Not at end of response
+                // Resize response buffer if necessary
+                if (response_buffer->length + 1 >= response_buffer->size) {
+                    resize_buffer(response_buffer, response_buffer->size * 2);
+                }
+                continue;
+            }
         } else if (strstr(response_buffer->buffer, "A003 NO") != NULL) {
             fprintf(stderr, "Error: UID SEARCH command error. (server's response NO)\n");
-            return false;
+            return false;  // Fail
         } else if (strstr(response_buffer->buffer, "A003 BAD") != NULL) {
             fprintf(stderr, "Error: UID SEARCH command error. (server's response BAD)\n");
-            return false;
+            return false; // Fail
         }
 
-        // Resize the buffer if necessary
+        // Resize buffer if necessary
         if (response_buffer->length + 1 >= response_buffer->size) {
             resize_buffer(response_buffer, response_buffer->size * 2);
         }
     }
 
     if (bytes <= 0) {
+        // Recieving response failed
         fprintf(stderr, "Error: recv() for UID SEARCH response failed.\n");
         return false;
     }
 
+    // When program got here some other unexpected failure happened
     fprintf(stderr, "Error: Unexpected failure in SEARCH command. (possibly wrong server response or connection failure)\n");
     return false;
 }
 
-bool fetchSecure(SSL *ssl, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool headers_only, bool new_only, bool redownload_all) {
+bool fetchSecure(SSL *ssl, DynamicBuffer *server, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool headers_only, bool new_only, bool redownload_all) {
     DynamicBuffer *search_response_buffer = create_buffer(8192);  // Dynamic buffer for the response
     DynamicBuffer *all_uids = create_buffer(1024);  // Buffer to hold all UIDs
     int email_count = 0;
 
-    // Step 1: Send UID SEARCH command and get the response
+    // Send UID SEARCH command and get the response
     if (!uidSearchSecure(ssl, new_only, search_response_buffer)) {
+        // SEARCH command failed
         free_buffer(search_response_buffer);
         free_buffer(all_uids);
         return false;
     }
 
-    // Step 2: Extract UIDs from the response
-    if (!extract_uids(search_response_buffer->buffer, all_uids->buffer, all_uids->size)) {
+    // Extract UIDs from SEARCH response
+    if (!extract_uids(search_response_buffer->buffer, all_uids)) {
+        // Extracting UIDs failed
         free_buffer(search_response_buffer);
         free_buffer(all_uids);
         return false;
     }
 
-    // Step 3: Fetch each email or header using the UIDs
+    // Fetch content (email or header) for each UID
     char *uid = strtok(all_uids->buffer, " ");
     int tag_counter = 5;
 
-    if (redownload_all) {
-        printf("UIDValidity changed. Redownloading all emails.\n");
-    }
-
     while (uid) {
-        // Dynamically construct the filename buffer
-        size_t filename_size = out_dir->length + mailbox->length + strlen(uid) + 30;
+        // Construct filename 
+        size_t filename_size = out_dir->length + server->length + mailbox->length + strlen(uid) + 30;
         DynamicBuffer *filename_buffer = create_buffer(filename_size);
 
         if (headers_only) {
-            snprintf(filename_buffer->buffer, filename_buffer->size, "%s/%s_header_%s.txt", out_dir->buffer, mailbox->buffer, uid);
+            snprintf(filename_buffer->buffer, filename_buffer->size, "%s/%s_%s_email_%s_header.eml", out_dir->buffer, server->buffer, mailbox->buffer, uid);
         } else {
-            snprintf(filename_buffer->buffer, filename_buffer->size, "%s/%s_email_%s.eml", out_dir->buffer, mailbox->buffer, uid);
+            snprintf(filename_buffer->buffer, filename_buffer->size, "%s/%s_%s_email_%s_full.eml", out_dir->buffer, server->buffer, mailbox->buffer, uid);
         }
 
+        // Skip fetching if the email already exists and UIDVALIDITY has not changed
         if (!redownload_all && access(filename_buffer->buffer, F_OK) == 0) {
             printf("Email %s already exists in mailbox %s. Skipping download.\n", uid, mailbox->buffer);
             free_buffer(filename_buffer);
@@ -629,9 +696,9 @@ bool fetchSecure(SSL *ssl, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool 
             continue;
         }
 
-        printf("Fetching %s for UID: %s in mailbox: %s\n", headers_only ? "headers" : "full email", uid, mailbox->buffer);
+        printf("Fetching %s for UID %s in %s\n", headers_only ? "headers" : "full email", uid, mailbox->buffer);
 
-        // Use a fixed-size buffer for the fetch command
+        // Construct FETCH command
         char fetch_cmd[128];
         char tag[16];
         int written = snprintf(tag, sizeof(tag), "B00%d", tag_counter++);
@@ -639,13 +706,13 @@ bool fetchSecure(SSL *ssl, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool 
             fprintf(stderr, "Error: Exceeded supported tag length.\n");
         }
 
-
         if (headers_only) {
             snprintf(fetch_cmd, sizeof(fetch_cmd), "%s UID FETCH %s BODY.PEEK[HEADER]\r\n", tag, uid);
         } else {
             snprintf(fetch_cmd, sizeof(fetch_cmd), "%s UID FETCH %s BODY[]\r\n", tag, uid);
         }
 
+        // Send FETCH command using SSL
         if (SSL_write(ssl, fetch_cmd, strlen(fetch_cmd)) <= 0) {
             fprintf(stderr, "Error: SSL_write() for UID FETCH command failed.\n");
             free_buffer(search_response_buffer);
@@ -654,47 +721,85 @@ bool fetchSecure(SSL *ssl, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool 
             return false;
         }
 
-        DynamicBuffer *response_buffer = create_buffer(16000);
-        char email_buffer[16000];  // Fixed-size buffer for SSL reading
+        printf("Sent fetch command:\n%s\n", fetch_cmd);
+
+        // Recieving FETCH command response
+        DynamicBuffer *response_buffer = create_buffer(4096);
+        char email_buffer[4096];
         int email_bytes;
-        size_t line_count = 0;
+        
+        size_t email_size = 0; // Size of email content
+        bool size_extracted = false; // Flag if size is extracted
+        bool first_crlf = false; // Flag to detect first line of response
+        int email_start = 0; // Index of start of email content
 
+        // Loop to handle potential multi part server response
         while ((email_bytes = SSL_read(ssl, email_buffer, sizeof(email_buffer) - 1)) > 0) {
-            email_buffer[email_bytes] = '\0';
-            write_to_buffer(response_buffer, email_buffer);  // Write received data to dynamic response buffer
+            if (email_bytes > 0) {
+                email_buffer[email_bytes] = '\0';
+                write_to_buffer(response_buffer, email_buffer);
 
-            printf("Server select response: %s\n", response_buffer->buffer);
-
-            // Count the number of lines
-            for (int i = 0; i < email_bytes; i++) {
-                if (email_buffer[i] == '\n') {
-                    line_count++;
+                if (!first_crlf) {
+                    // Look for CRLF to mark end of first response line
+                    if (strstr(response_buffer->buffer, "\r\n") != NULL) {
+                        first_crlf = true;
+                    }
                 }
-            }
-
-            if (strstr(email_buffer, tag) != NULL) {
-                if (strstr(email_buffer, "OK UID FETCH completed") != NULL) {
-                    printf("SUCCESFULLY FETCHED EMAIL %s\n",uid);
-                    break;  // Successfully fetched the email
-                } else if (strstr(email_buffer, "NO") != NULL) {
-                    fprintf(stderr, "Error: UID FETCH command error (server's response NO with tag %s).\n", tag);
+                
+                // Extract email size and locate start of email content (not before first line was fully read)
+                if (first_crlf == true){
+                    if (!size_extracted) {
+                        email_size = extract_email_size(response_buffer->buffer);
+                        email_start = find_email_start(response_buffer->buffer);
+                        if (email_start < 0) {
+                            // Finding email start failed
+                            fprintf(stderr, "Error: Could not find start of email content in first line of servers response.\n");
+                            free_buffer(response_buffer);
+                            free_buffer(all_uids);
+                            free_buffer(filename_buffer);
+                            free_buffer(search_response_buffer);
+                            return false;
+                        }
+                        size_extracted = true;
+                    }
+                }
+                
+                // Check for server completion responses
+                if (strstr(response_buffer->buffer, tag) && strstr(response_buffer->buffer, "OK") != NULL) {
+                    // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+                    // Check if the last two characters in the buffer are \r\n
+                    if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                        // Entire OK line has been received
+                        printf("Succesfully fetched and stored email %s\n", uid);
+                        break; // Success
+                    } 
+                    else {
+                        // Not at end of response
+                        continue;
+                    }
+                } 
+                else if (strstr(response_buffer->buffer, tag) && strstr(response_buffer->buffer, "NO") != NULL) {
+                    fprintf(stderr, "Error: UID FETCH command error. (server's response NO)\n");
                     free_buffer(response_buffer);
                     free_buffer(all_uids);
                     free_buffer(filename_buffer);
                     free_buffer(search_response_buffer);
-                    return false;
-                } else if (strstr(email_buffer, "BAD") != NULL) {
-                    fprintf(stderr, "Error: UID FETCH command error (server's response BAD with tag %s).\n", tag);
+                    return false; // Fail
+                } 
+                else if (strstr(response_buffer->buffer, tag) && strstr(response_buffer->buffer, "BAD") != NULL) {
+                    fprintf(stderr, "Error: UID FETCH command error. (server's response BAD)\n");
                     free_buffer(response_buffer);
                     free_buffer(all_uids);
                     free_buffer(filename_buffer);
                     free_buffer(search_response_buffer);
-                    return false;
+                    return false; // Fail
                 }
+
             }
         }
 
         if (email_bytes <= 0) {
+            // Recieving response failed
             fprintf(stderr, "Error: SSL_read() for UID FETCH command failed.\n");
             free_buffer(response_buffer);
             free_buffer(all_uids);
@@ -703,9 +808,10 @@ bool fetchSecure(SSL *ssl, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool 
             return false;
         }
 
-        // Open file for writing the email or headers
+        // Open file for writing the email or headers content
         FILE *file = fopen(filename_buffer->buffer, "w");
         if (!file) {
+            // Opening file failed
             fprintf(stderr, "Error: opening file for writing email/headers failed.\n");
             free_buffer(response_buffer);
             free_buffer(all_uids);
@@ -714,28 +820,16 @@ bool fetchSecure(SSL *ssl, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool 
             return false;
         }
 
-        size_t current_line = 0;
-        bool writing_started = false;
-
-        for (size_t i = 0; i < response_buffer->length; i++) {
-            if (response_buffer->buffer[i] == '\n') {
-                current_line++;
-            }
-
-            if (current_line > 0 && current_line < line_count - 2) {
-                if (!writing_started && response_buffer->buffer[i] == '\n') {
-                    continue;
-                }
-                fputc(response_buffer->buffer[i], file);  // Write actual content to the file
-                writing_started = true;
-            }
+        // Write exactly the email_size worth of bytes from the response_buffer
+        for (size_t i = email_start; i < email_start + email_size; i++) {
+            fputc(response_buffer->buffer[i], file);
         }
 
+        // Completed write for current UID email content
         fclose(file);
         free_buffer(filename_buffer);
         free_buffer(response_buffer);
 
-        printf("Completed write for UID: %s\n", uid);
         email_count++;
 
         uid = strtok(NULL, " \r\n");
@@ -755,51 +849,51 @@ bool fetchSecure(SSL *ssl, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool 
             fprintf(stdout, "Downloaded %d messages from mailbox %s.\n", email_count, mailbox->buffer);
         }
     }
-
+    
+    // Cleanup
     free_buffer(all_uids);
     free_buffer(search_response_buffer);
 
     return true;
 }
 
-bool fetchUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool headers_only, bool new_only, bool redownload_all) {
-    DynamicBuffer *search_response_buffer = create_buffer(8192);  // Dynamic buffer for the response
-    DynamicBuffer *all_uids = create_buffer(1024);  // Dynamic buffer to hold all UIDs
+bool fetchUnsecure(int sockfd, DynamicBuffer *server, DynamicBuffer *mailbox, DynamicBuffer *out_dir, bool headers_only, bool new_only, bool redownload_all) {
+    DynamicBuffer *search_response_buffer = create_buffer(8192);
+    DynamicBuffer *all_uids = create_buffer(1024);
     int email_count = 0;
 
-    // Step 1: Send UID SEARCH command and get the response
+    // Send UID SEARCH command and get the response
     if (!uidSearchUnsecure(sockfd, new_only, search_response_buffer)) {
+        // SEARCH command failed
         free_buffer(search_response_buffer);
         free_buffer(all_uids);
         return false;
     }
 
-    // Step 2: Extract UIDs from the response
-    if (!extract_uids(search_response_buffer->buffer, all_uids->buffer, all_uids->size)) {
+    // Extract UIDs from SEARCH response
+    if (!extract_uids(search_response_buffer->buffer, all_uids)) {
+        // Extracting UIDs failed
         free_buffer(search_response_buffer);
         free_buffer(all_uids);
         return false;
     }
 
-    // Step 3: Fetch each email or header using the UIDs
+    // Fetch content (email or header) for each UID
     char *uid = strtok(all_uids->buffer, " ");
     int tag_counter = 5;
 
-    if (redownload_all) {
-        printf("UIDValidity changed. Redownloading all emails.\n");
-    }
-
     while (uid) {
-        // Dynamically construct the filename buffer
-        size_t filename_size = out_dir->length + mailbox->length + strlen(uid) + 30;
+        // Construct filename 
+        size_t filename_size = out_dir->length + server->length + mailbox->length + strlen(uid) + 30;
         DynamicBuffer *filename_buffer = create_buffer(filename_size);
 
         if (headers_only) {
-            snprintf(filename_buffer->buffer, filename_buffer->size, "%s/%s_header_%s.txt", out_dir->buffer, mailbox->buffer, uid);
+            snprintf(filename_buffer->buffer, filename_buffer->size, "%s/%s_%s_email_%s_header.eml", out_dir->buffer, server->buffer, mailbox->buffer, uid);
         } else {
-            snprintf(filename_buffer->buffer, filename_buffer->size, "%s/%s_email_%s.eml", out_dir->buffer, mailbox->buffer, uid);
+            snprintf(filename_buffer->buffer, filename_buffer->size, "%s/%s_%s_email_%s_full.eml", out_dir->buffer, server->buffer, mailbox->buffer, uid);
         }
 
+        // Skip fetching if the email already exists and UIDVALIDITY has not changed
         if (!redownload_all && access(filename_buffer->buffer, F_OK) == 0) {
             printf("Email %s already exists in mailbox %s. Skipping download.\n", uid, mailbox->buffer);
             free_buffer(filename_buffer);
@@ -809,7 +903,7 @@ bool fetchUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *out_dir, b
 
         printf("Fetching %s for UID: %s in mailbox: %s\n", headers_only ? "headers" : "full email", uid, mailbox->buffer);
 
-        // Use a fixed-size buffer for the fetch command
+        // Construct FETCH command
         char fetch_cmd[128];
         char tag[16];
         int written = snprintf(tag, sizeof(tag), "A00%d", tag_counter++);
@@ -817,13 +911,13 @@ bool fetchUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *out_dir, b
             fprintf(stderr, "Error: Exceeded supported tag length.\n");
         }
 
-
         if (headers_only) {
             snprintf(fetch_cmd, sizeof(fetch_cmd), "%s UID FETCH %s BODY.PEEK[HEADER]\r\n", tag, uid);
         } else {
             snprintf(fetch_cmd, sizeof(fetch_cmd), "%s UID FETCH %s BODY[]\r\n", tag, uid);
         }
 
+        // Send FETCH command using unsecure socket
         if (send(sockfd, fetch_cmd, strlen(fetch_cmd), 0) < 0) {
             fprintf(stderr, "Error: send() for UID FETCH command failed.\n");
             free_buffer(search_response_buffer);
@@ -831,43 +925,82 @@ bool fetchUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *out_dir, b
             free_buffer(filename_buffer);
             return false;
         }
-
-        DynamicBuffer *response_buffer = create_buffer(8192);
-        char email_buffer[8192];  // Dynamic buffer for email content
+        
+        // Recieving FETCH command response
+        DynamicBuffer *response_buffer = create_buffer(4096);
+        char email_buffer[4096];
         int email_bytes;
-        size_t line_count = 0;
+        
+        size_t email_size = 0; // Size of email content
+        bool size_extracted = false; // Flag if size is extracted
+        bool first_crlf = false; // Flag to detect first line of response
+        int email_start = 0; // Index of start of email content
 
+        // Loop to handle potential multi part server response
         while ((email_bytes = recv(sockfd, email_buffer, sizeof(email_buffer) - 1, 0)) > 0) {
-            email_buffer[email_bytes] = '\0';
-            write_to_buffer(response_buffer, email_buffer);  // Null-terminate the received data
+            if (email_bytes > 0) {
+                email_buffer[email_bytes] = '\0';
+                write_to_buffer(response_buffer, email_buffer);
 
-            // Count the number of lines
-            for (int i = 0; i < email_bytes; i++) {
-                if (email_buffer[i] == '\n') {
-                    line_count++;
+                if (!first_crlf) {
+                    // Look for CRLF to mark end of first response line
+                    if (strstr(response_buffer->buffer, "\r\n") != NULL) {
+                        first_crlf = true;
+                    }
                 }
-            }
-
-            if (strstr(email_buffer, tag) && strstr(email_buffer, "OK UID FETCH completed") != NULL) {
-                break;  // Done receiving this email
-            } else if (strstr(email_buffer, tag) && strstr(email_buffer, "NO") != NULL) {
-                fprintf(stderr, "Error: UID FETCH command error. (server's response NO)\n");
-                free_buffer(response_buffer);
-                free_buffer(all_uids);
-                free_buffer(filename_buffer);
-                free_buffer(search_response_buffer);
-                return false;
-            } else if (strstr(email_buffer, tag) && strstr(email_buffer, "BAD") != NULL) {
-                fprintf(stderr, "Error: UID FETCH command error. (server's response BAD)\n");
-                free_buffer(response_buffer);
-                free_buffer(all_uids);
-                free_buffer(filename_buffer);
-                free_buffer(search_response_buffer);
-                return false;
+                    
+                // Extract email size and locate start of email content (not before first line was fully read)
+                if (first_crlf == true){
+                    if (!size_extracted) {
+                        email_size = extract_email_size(response_buffer->buffer);
+                        email_start = find_email_start(response_buffer->buffer);
+                        if (email_start < 0) {
+                            // Finding email start failed
+                            fprintf(stderr, "Error: Could not find start of email content in first line of servers response.\n");
+                            free_buffer(response_buffer);
+                            free_buffer(all_uids);
+                            free_buffer(filename_buffer);
+                            free_buffer(search_response_buffer);
+                            return false;
+                        }
+                        size_extracted = true;
+                    }
+                }
+                // Check for server completion responses
+                if (strstr(response_buffer->buffer, tag) && strstr(response_buffer->buffer, "OK") != NULL) {
+                    // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+                    // Check if the last two characters in the buffer are \r\n
+                    if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                        // Entire OK line has been received
+                        printf("SUCCESFULLY FETCHED EMAIL %s\n", uid);
+                        break; // Success
+                    } 
+                    else {
+                        // Not at end of response
+                        continue;
+                    }
+                } 
+                else if (strstr(response_buffer->buffer, tag) && strstr(response_buffer->buffer, "NO") != NULL) {
+                    fprintf(stderr, "Error: UID FETCH command error. (server's response NO)\n");
+                    free_buffer(response_buffer);
+                    free_buffer(all_uids);
+                    free_buffer(filename_buffer);
+                    free_buffer(search_response_buffer);
+                    return false; // Fail
+                } 
+                else if (strstr(response_buffer->buffer, tag) && strstr(response_buffer->buffer, "BAD") != NULL) {
+                    fprintf(stderr, "Error: UID FETCH command error. (server's response BAD)\n");
+                    free_buffer(response_buffer);
+                    free_buffer(all_uids);
+                    free_buffer(filename_buffer);
+                    free_buffer(search_response_buffer);
+                    return false; // Fail
+                }
             }
         }
 
         if (email_bytes <= 0) {
+            // Recieving response failed
             fprintf(stderr, "Error: recv() for UID FETCH command failed.\n");
             free_buffer(response_buffer);
             free_buffer(all_uids);
@@ -876,9 +1009,10 @@ bool fetchUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *out_dir, b
             return false;
         }
 
-        // Open file for writing the email or headers
+        // Open file for writing the email or headers content
         FILE *file = fopen(filename_buffer->buffer, "w");
         if (!file) {
+            // Opening file failed
             fprintf(stderr, "Error: opening file for writing email/headers failed.\n");
             free_buffer(response_buffer);
             free_buffer(all_uids);
@@ -887,30 +1021,16 @@ bool fetchUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *out_dir, b
             return false;
         }
 
-        size_t current_line = 0;
-        bool writing_started = false;
-
-        for (size_t i = 0; i < response_buffer->length; i++) {
-            if (response_buffer->buffer[i] == '\n') {
-                current_line++;
-            }
-
-            if (current_line > 0 && current_line < line_count - 2) {
-                if (!writing_started && response_buffer->buffer[i] == '\n') {
-                    continue;
-                }
-                fputc(response_buffer->buffer[i], file);  // Write actual content to the file
-                writing_started = true;
-            }
+        // Write exactly the email_size worth of bytes from the response_buffer
+        for (size_t i = email_start; i < email_start + email_size; i++) {
+            fputc(response_buffer->buffer[i], file);
         }
 
+        // Completed write for current UID email content
         fclose(file);
         free_buffer(filename_buffer);
         free_buffer(response_buffer);
-
-        printf("Completed write for UID: %s\n", uid);
         email_count++;
-
         uid = strtok(NULL, " \r\n");
     }
 
@@ -929,78 +1049,91 @@ bool fetchUnsecure(int sockfd, DynamicBuffer *mailbox, DynamicBuffer *out_dir, b
         }
     }
 
+    // Cleanup
     free_buffer(all_uids);
     free_buffer(search_response_buffer);
 
     return true;
 }
 
-
 bool logoutSecure(SSL *ssl) {
     char logout_cmd[] = "B004 LOGOUT\r\n";
 
-    // Send the LOGOUT command
+    // Send LOGOUT command using SSL
     if (SSL_write(ssl, logout_cmd, strlen(logout_cmd)) <= 0) {
         fprintf(stderr, "Error: SSL_write() for LOGOUT command failed.\n");
         return false;
     }
 
-    printf("Sent logout command: %s", logout_cmd);
+    printf("Sent logout command:\n%s\n", logout_cmd);
 
-    // Create dynamic buffer for the server's response
-    DynamicBuffer *response_buffer = create_buffer(1024);  // Initial buffer size
+    // Recieving LOGOUT command response
+    DynamicBuffer *response_buffer = create_buffer(1024);
     int bytes;
 
-    // Receive the server's response
+    // Loop to handle potential multi part server response
     while ((bytes = SSL_read(ssl, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1)) > 0) {
         response_buffer->length += bytes;
         response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
 
-        printf("Server logout response: %s\n", response_buffer->buffer);
+        printf("Server logout response:\n%s\n", response_buffer->buffer);
 
         if (strstr(response_buffer->buffer, "B004 OK") != NULL) {
-            printf("Logout completed.\n");
-            free_buffer(response_buffer);
-            return true;
+            // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+            // Check if the last two characters in the buffer are \r\n
+            if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                // Entire OK line has been received
+                printf("Logout completed.\n");
+                free_buffer(response_buffer);
+                return true; // Success
+                } 
+            else {
+                // Not at end of response
+                // Resize response buffer if necessary
+                if (response_buffer->length + 1 >= response_buffer->size) {
+                    resize_buffer(response_buffer, response_buffer->size * 2);
+                }
+                continue;
+            }
         } else if (strstr(response_buffer->buffer, "B004 BAD") != NULL) {
             fprintf(stderr, "Error: LOGOUT command failed. (server's response BAD)\n");
             free_buffer(response_buffer);
-            return false;
+            return false; // Fail
         }
 
-        // Resize the buffer if necessary
+        // Resize buffer if necessary
         if (response_buffer->length + 1 >= response_buffer->size) {
             resize_buffer(response_buffer, response_buffer->size * 2);
         }
     }
 
     if (bytes <= 0) {
+        // Recieving response failed
         fprintf(stderr, "Error: SSL_read() failed for LOGOUT response.\n");
         free_buffer(response_buffer);
         return false;
     }
 
+    // When program got here some other unexpected failure happened
     fprintf(stderr, "Error: Unexpected failure in LOGOUT command. (possibly wrong server response or connection failure)\n");
     free_buffer(response_buffer);
     return false;
 }
 
 bool logoutUnsecure(int sockfd) {
-    char logout_cmd[] = "A004 LOGOUT\r\n";  // IMAP LOGOUT command
+    char logout_cmd[] = "A004 LOGOUT\r\n";
 
-    // Send the LOGOUT command
+    // Send LOGOUT command using unsecure socket
     if (send(sockfd, logout_cmd, strlen(logout_cmd), 0) < 0) {
         fprintf(stderr, "Error: send() for LOGOUT command failed.\n");
         return false;
     }
 
-    printf("Sent logout command: %s", logout_cmd);
-
-    // Create dynamic buffer for the server's response
+    // Recieving LOGOUT command response
     DynamicBuffer *response_buffer = create_buffer(1024);  // Initial buffer size
     int bytes;
 
-    // Receive the server's response
+    // Loop to handle potential multi part server response
     while ((bytes = recv(sockfd, response_buffer->buffer + response_buffer->length, response_buffer->size - response_buffer->length - 1, 0)) > 0) {
         response_buffer->length += bytes;
         response_buffer->buffer[response_buffer->length] = '\0';  // Null-terminate the response
@@ -1009,28 +1142,42 @@ bool logoutUnsecure(int sockfd) {
 
         // Check for a successful logout response
         if (strstr(response_buffer->buffer, "A004 OK") != NULL) {
-            printf("Logout completed.\n");
-            free_buffer(response_buffer);
-            return true;
+            // For cases when recieved "OK" byt som bytes are still left to be read from response (they did not fit to buffer)
+            // Check if the last two characters in the buffer are \r\n
+            if (response_buffer->buffer[response_buffer->length - 2] == '\r' && response_buffer->buffer[response_buffer->length - 1] == '\n') {
+                // Entire OK line has been received
+                printf("Logout completed.\n");
+                free_buffer(response_buffer);
+                return true; // Success
+                } 
+            else {
+                // Not at end of response
+                // Resize response buffer if necessary
+                if (response_buffer->length + 1 >= response_buffer->size) {
+                    resize_buffer(response_buffer, response_buffer->size * 2);
+                }
+                continue;
+            }
         } else if (strstr(response_buffer->buffer, "A004 BAD") != NULL) {
             fprintf(stderr, "Error: LOGOUT command failed. (server's response BAD)\n");
             free_buffer(response_buffer);
-            return false;
+            return false; // Fail
         }
 
-        // Resize the buffer if necessary
+        // Resize buffer if necessary
         if (response_buffer->length + 1 >= response_buffer->size) {
             resize_buffer(response_buffer, response_buffer->size * 2);
         }
     }
 
-    // Error handling if recv returns -1 (error)
     if (bytes < 0) {
+        // Recieving response failed
         fprintf(stderr, "Error: recv() for LOGOUT command response failed.\n");
         free_buffer(response_buffer);
         return false;
     }
 
+    // When program got here some other unexpected failure happened
     fprintf(stderr, "Error: Unexpected failure in LOGOUT command. (possibly wrong server response or connection failure)\n");
     free_buffer(response_buffer);
     return false;
@@ -1040,24 +1187,27 @@ bool SecureCommunication(SSL *ssl, const struct Config *config) {
     DynamicBuffer *uidvalidity = create_buffer(256);
     const char *uidvalidity_file = "uidvalidity.txt";
 
-    // LOGIN
+    // LOGIN with provided username and password
     if (!loginSecure(ssl, config->username, config->password)) {
+        // LOGIN failed
         free_buffer(uidvalidity);
         return false;
     }
 
-    // SELECT
+    // SELECT mailbox and retrieve UIDValidity
     if (!selectSecure(ssl, config->mailbox, uidvalidity)) {
+        // SELECT failed
         logoutSecure(ssl);
         free_buffer(uidvalidity);
         return false;
     }
 
-    // compare uidvalidity to check it is same or not
+    // Compare uidvalidity to check it is same or not
     bool same_uidvalidity = compare_uidvalidity(uidvalidity_file, uidvalidity->buffer);
 
-    // FETCH
-    if (!fetchSecure(ssl, config->mailbox, config->out_dir, config->headers_only, config->new_only, !same_uidvalidity)) {
+    // FETCH emails or headers based on configuration
+    if (!fetchSecure(ssl, config-> server, config->mailbox, config->out_dir, config->headers_only, config->new_only, !same_uidvalidity)) {
+        // FETCH failed
         logoutSecure(ssl);
         free_buffer(uidvalidity);
         return false;
@@ -1065,10 +1215,12 @@ bool SecureCommunication(SSL *ssl, const struct Config *config) {
 
     // LOGOUT
     if (!logoutSecure(ssl)) {
+        // LOGOUT failed
         free_buffer(uidvalidity);
         return false;
     }
 
+    // CLean up
     free_buffer(uidvalidity);
     return true;
 }
@@ -1078,28 +1230,27 @@ bool UnsecureCommunication(int sockfd, const struct Config *config) {
     DynamicBuffer *uidvalidity = create_buffer(256);
     const char *uidvalidity_file = "uidvalidity.txt";
 
-    // LOGIN
+    // LOGIN with provided username and password
     if (!loginUnsecure(sockfd, config->username, config->password)) {
+        // LOGIN failed
         free_buffer(uidvalidity);
         return false;
     }
-
-    //listMailboxesUnsecure(sockfd);
     
-    // SELECT
+    // SELECT mailbox and retrieve UIDValidity
     if (!selectUnsecure(sockfd, config->mailbox, uidvalidity)) {
+        // SELECT failed
         logoutUnsecure(sockfd);
         free_buffer(uidvalidity);
         return false;
     }
 
-    printf("selected\n");
-
-    // compare uidvalidity to check it is same or not
+    // Compare uidvalidity to check it is same or not
     bool same_uidvalidity = compare_uidvalidity(uidvalidity_file, uidvalidity->buffer);
 
-    // FETCH
-    if (!fetchUnsecure(sockfd, config->mailbox, config->out_dir, config->headers_only, config->new_only, !same_uidvalidity)) {
+    // FETCH emails or headers based on configuration
+    if (!fetchUnsecure(sockfd,config->server, config->mailbox, config->out_dir, config->headers_only, config->new_only, !same_uidvalidity)) {
+        // FETCH failed
         logoutUnsecure(sockfd);
         free_buffer(uidvalidity);
         return false;
@@ -1107,10 +1258,12 @@ bool UnsecureCommunication(int sockfd, const struct Config *config) {
 
     // LOGOUT
     if (!logoutUnsecure(sockfd)) {
+        // LOGOUT failed
         free_buffer(uidvalidity);
         return false;
     }
 
+    // CLean up
     free_buffer(uidvalidity);
     return true;
 }
