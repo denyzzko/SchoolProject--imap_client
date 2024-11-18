@@ -1,6 +1,6 @@
 /**
  * @file connection.c
- * @brief Manages the creation and handling of raw and secure connections to the server
+ * @brief Manages the creation of raw socket, connecting it to server and securing it with SSL/TLS
  * @author Denis Milistenfer <xmilis00@stud.fit.vutbr.cz>
  * @date 27.9.2024
  */
@@ -33,7 +33,6 @@ int create_raw_socket(const char *hostname, int port) {
     struct addrinfo hints, *res, *p;
     char port_str[6];
     int status;
-    char ipstr[INET6_ADDRSTRLEN];      //for pirnting ip adress so delete !!!!!!!!!!
 
     // Convert port number to string
     snprintf(port_str, sizeof(port_str), "%d", port);
@@ -48,32 +47,6 @@ int create_raw_socket(const char *hostname, int port) {
         fprintf(stderr, "Error: getaddrinfo failed: %s\n", gai_strerror(status));
         return -1;
     }
-    
-    //for pirnting ip adress so delete !!!!!!!!!!***************************************
-    printf("Resolved IP addresses for %s:\n", hostname);
-    // Print resolved IP addresses
-    for (p = res; p != NULL; p = p->ai_next) {
-        void *addr;
-        const char *ipver;
-
-        // Determine whether it's IPv4 or IPv6
-        if (p->ai_family == AF_INET) { // IPv4
-            struct sockaddr_in *ipv4 = (struct sockaddr_in *)p->ai_addr;
-            addr = &(ipv4->sin_addr);
-            ipver = "IPv4";
-        } else if (p->ai_family == AF_INET6) { // IPv6
-            struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)p->ai_addr;
-            addr = &(ipv6->sin6_addr);
-            ipver = "IPv6";
-        } else {
-            continue;
-        }
-
-        // Convert the IP address to a string
-        inet_ntop(p->ai_family, addr, ipstr, sizeof ipstr);
-        printf("  %s: %s\n", ipver, ipstr);
-    }
-    //******************************************************************************************
 
     // Loop through results and attemp to connect
     for (p = res; p != NULL; p = p->ai_next) {
@@ -110,7 +83,6 @@ int create_raw_socket(const char *hostname, int port) {
         return -1;
     }
 
-    printf("Connected to %s on port %d\n", hostname, port);
     // Return the socket file descriptor
     return sock;
 }
@@ -134,8 +106,6 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
             ERR_print_errors_fp(stderr);
             SSL_CTX_free(ctx);
             return NULL;
-        } else {
-            printf("Loaded certificate file: %s\n", certfile);
         }
     }
 
@@ -147,8 +117,6 @@ SSL_CTX* create_ssl_context(const char *certfile, const char *certdir) {
             ERR_print_errors_fp(stderr);
             SSL_CTX_free(ctx);
             return NULL;
-        } else {
-            printf("Loaded certificates from directory: %s\n", certdir);
         }
     }
 
@@ -174,8 +142,7 @@ SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
     // Get the server's certificate
     X509 *cert = SSL_get_peer_certificate(ssl);
     if (cert) {
-        printf("Server's certificate was received.\n");
-
+        // Server's certificate was received
         // Check if certificate is valid
         long verify_result = SSL_get_verify_result(ssl);
         if (verify_result != X509_V_OK) {
@@ -185,17 +152,9 @@ SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
             SSL_free(ssl);
             return NULL;
         }
-        printf("Server's certificate verified.\n");
-
-        // Optionally: Print certificate information (subject, issuer, etc.)
-        char *subject = X509_NAME_oneline(X509_get_subject_name(cert), NULL, 0);
-        char *issuer = X509_NAME_oneline(X509_get_issuer_name(cert), NULL, 0);
-        printf("Certificate Subject: %s\n", subject);
-        printf("Certificate Issuer: %s\n", issuer);
+        //Server's certificate verified
 
         // Free memory allocated for certificates
-        OPENSSL_free(subject);
-        OPENSSL_free(issuer);
         X509_free(cert);
     } else {
         // No certificate found
@@ -203,8 +162,8 @@ SSL* create_secure_connection(int sockfd, SSL_CTX *ctx) {
         SSL_free(ssl);
         return NULL;
     }
+
     // Return SSL object for secure communication
-    printf("SSL connection established\n");
     return ssl;
 }
 
@@ -212,5 +171,4 @@ void close_secure_connection(SSL *ssl, SSL_CTX *ctx) {
     SSL_shutdown(ssl);
     SSL_free(ssl);
     SSL_CTX_free(ctx);
-    printf("Secure connection closed, SSL context freed.\n");
 }

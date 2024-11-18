@@ -23,6 +23,8 @@ bool compare_uidvalidity(const char *file_path, const char *new_uidvalidity);
 size_t extract_email_size(const char *response);
 // Helper function to find start of the email content from server response
 int find_email_start(const char* response);
+// Helper function to compare strings in case-insensitive way
+char *strcasestr(const char *string, const char *keyword);
 
 // Functions that perform LOGIN command
 bool loginSecure(SSL *ssl, DynamicBuffer *username, DynamicBuffer *password);

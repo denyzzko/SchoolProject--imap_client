@@ -15,16 +15,16 @@
 // Function to initialize openssl
 void initialize_openssl();
 
-// Function to create socket
+// Function to create socket and connect it to given server
 int create_raw_socket(const char *hostname, int port);
 
-// Function to create ssl context (for optional certificate file and directory)
+// Function to create ssl context
 SSL_CTX* create_ssl_context(const char *certfile, const char *certdir);
 
-// Function to create a secure connection with raw socket and SSL context
+// Function to secure connection with raw socket and SSL context
 SSL* create_secure_connection(int sockfd, SSL_CTX *ctx);
 
-// Function to close a secure SSL connection and free resources
+// Function to close a secure connection and free resources
 void close_secure_connection(SSL *ssl, SSL_CTX *ctx);
 
 #endif

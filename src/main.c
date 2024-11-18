@@ -150,13 +150,11 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         // Closing secure connection
-        printf("Closing secure connection...\n");
         close_secure_connection(ssl, ctx);
     } else {
         // UNSECURE COMMUNICATION
         if (!UnsecureCommunication(sockfd, &config)) {
             // Unsecure communication failed
-            printf("Closing unsecure connection...\n");
             close(sockfd);
             free_config(&config);
             return 1;
@@ -165,7 +163,6 @@ int main(int argc, char* argv[]) {
     
     // Close the socket after communication
     close(sockfd);
-    printf("Socket closed\n");
 
     // Clean allocated memory for the Config structure
     free_config(&config);
